@@ -2,6 +2,8 @@
 setlocal enabledelayedexpansion
 chcp 65001 >nul 2>&1
 
+title flow_captcha_service - 一键启动脚本 (standalone 模式)
+
 cd /d "%~dp0"
 
 echo.
