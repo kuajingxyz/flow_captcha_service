@@ -12,7 +12,270 @@
 
 ---
 
-## 傻瓜式 Docker 快速开始
+## 与 flow2api 内置打码的深度对比分析
+
+### 两种打码路径概览
+
+`flow2api` 提供两条并行的打码路径：
+
+```text
+路径 A（内置模式）：
+flow2api → 本地 browser_captcha.py (Playwright) 或 browser_captcha_personal.py (nodriver)
+
+路径 B（外部服务模式）：
+flow2api → remote_browser → flow_captcha_service HTTP API
+```
+
+路径 A 将打码能力直接嵌入 `flow2api` 进程内，是零网络开销的本地调用。  
+路径 B 将打码拆分为独立服务，由 `flow_captcha_service` 统一管理。
+
+---
+
+### 技术实现对比
+
+#### flow2api 内置打码（路径 A）
+
+| 项目 | 细节 |
+|------|------|
+| 技术栈 | Playwright（browser 模式）/ nodriver（personal 模式） |
+| 生命周期 | 随 flow2api 进程启动/关闭，不可独立运维 |
+| 并发控制 | 由 `browser_count` 控制 slot 数量，仅限本机 |
+| 指纹策略 | UA 随机化 + viewport 随机化，每 slot 维护独立 profile |
+| 会话协议 | 无独立会话生命周期，token 取完即用 |
+| 用户管理 | 无，依赖 flow2api 的 token 管理 |
+| 部署方式 | 与 flow2api 共生，仅单机 |
+| 可观测性 | 依赖 flow2api 日志 |
+
+#### flow_captcha_service 打码（路径 B）
+
+| 项目 | 细节 |
+|------|------|
+| 技术栈 | Playwright（browser 模式）/ nodriver（personal 模式） |
+| 生命周期 | 独立服务，独立部署、升级、重启 |
+| 并发控制 | `browser_count` 控制 slot，支持多 subnode 水平扩容 |
+| 指纹策略 | 同 flow2api；额外支持 project 亲和（同 project 优先复用相同 slot） |
+| 会话协议 | `solve → finish/error` 完整会话协议，浏览器 context 保活至业务完成 |
+| 用户管理 | 用户门户 + API Key + 额度 + CDK 兑换 |
+| 部署方式 | standalone / master / subnode 三种角色，支持跨机器集群 |
+| 可观测性 | 独立管理后台、请求日志、子节点心跳历史、错误历史 |
+
+---
+
+### 关键设计差异
+
+#### 1. 会话保活语义（Session Lifecycle）
+
+`flow2api` 内置模式取到 token 后浏览器 context 即可释放或复用，上游业务是否成功与打码层无关。
+
+`flow_captcha_service` 实现了 **`solve → finish/error` 会话协议**：
+
+- `POST /api/v1/solve`：获取 token，同时在 `SessionRegistry` 中注册会话
+- `POST /api/v1/sessions/{id}/finish`：上游业务成功，打码层做正常收尾
+- `POST /api/v1/sessions/{id}/error`：上游命中验证码失败，打码层回收对应 browser slot
+
+这意味着打码层能感知上游业务结果，在失败时主动回收 slot、触发重新热身，而不是等到空闲超时才发现 slot 失效。
+
+#### 2. Standby Token 预热池
+
+`flow_captcha_service` 实现了 **standby token pool**（`browser_standby_token_pool_*` 系列配置）：
+
+- 后台持续往 bucket 里预先生成 token
+- 上游 `solve` 请求到达时直接从池中取，几乎零等待
+- `flow2api` 内置模式没有这层预热，每次请求都需实时启动浏览器流程
+
+#### 3. 请求 Bucket 亲和调度（Bucket Affinity）
+
+集群模式下，`master` 会对相同 `project_id + action` 的请求建立 **节点亲和**——即优先把同类请求路由给上次成功处理该 bucket 的 subnode，减少跨节点的 context 重建开销。`flow2api` 内置模式因为不跨机器，不存在这个问题。
+
+#### 4. 集群路由与心跳
+
+`flow_captcha_service` 的集群路由完全基于 HTTP（不依赖 Redis/消息队列），通过：
+
+- subnode 定时向 master 发送心跳（`POST /api/cluster/heartbeat`）
+- master 维护节点健康状态和活跃并发数
+- 按权重 + 空闲并发做加权选择
+
+`flow2api` 内置模式没有集群概念。
+
+#### 5. YesCaptcha 兼容协议层
+
+`flow_captcha_service` 实现了 `createTask / getTaskResult / getBalance` 兼容接口，支持多种 task.type（reCAPTCHA V2/V3/Enterprise、Turnstile 等）。
+
+这使得除 flow2api 之外的其他系统也可以直接以 YesCaptcha 协议格式接入，而 `flow2api` 内置模式不暴露任何外部协议。
+
+---
+
+### 优劣势总结
+
+#### flow_captcha_service 相比内置模式的优势
+
+| 优势 | 说明 |
+|------|------|
+| **水平扩容** | master + subnode 模式可跨多台机器分散浏览器压力，突破单机并发上限 |
+| **服务解耦** | 打码服务与 flow2api 独立部署，打码层重启/升级不影响主服务 |
+| **会话保活** | `finish/error` 让浏览器 context 与上游业务生命周期对齐，失败可立即回收 slot |
+| **Standby 预热** | 提前生成 token，请求命中时近零等待 |
+| **多租户额度** | 用户门户 + API Key + 配额，适合多团队共用一套打码基础设施 |
+| **协议兼容** | YesCaptcha 协议可让非 flow2api 上游系统直接接入 |
+| **可观测性** | 独立后台可查子节点状态、请求历史、错误统计，不依赖 flow2api 日志 |
+| **节点健康检测** | master 实时感知 subnode 存活，自动剔除失效节点 |
+
+#### flow_captcha_service 相比内置模式的劣势
+
+| 劣势 | 说明 |
+|------|------|
+| **部署复杂度更高** | 需要额外运维一个独立服务，增加了基础设施复杂度 |
+| **额外网络延迟** | flow2api 每次取 token 需发 HTTP 请求，比进程内直接调用多一层网络往返 |
+| **依赖链更长** | flow2api + flow_captcha_service 组合比单体部署多一个故障点 |
+| **集群配置工作量** | `cluster_key`、`node_public_base_url` 等需精确配置，否则子节点无法注册 |
+| **小规模场景性价比低** | 单机单用户时，直接用 flow2api 内置 `browser`/`personal` 更简单 |
+
+---
+
+### 选型建议
+
+| 场景 | 推荐方案 |
+|------|---------|
+| 个人本地使用，单机单用户 | flow2api 内置 `browser` 或 `personal` 模式 |
+| 单机多用户，需要额度管控 | flow_captcha_service `standalone` |
+| 多台机器、高并发生产环境 | flow_captcha_service `master + subnode` 集群 |
+| 需要对外统一提供打码能力 | flow_captcha_service（YesCaptcha 协议统一接入） |
+| 希望最小化基础设施复杂度 | flow2api 内置模式（减少外部依赖） |
+
+---
+
+---
+
+## Windows 本地集群快速启动
+
+如果你在 **多台 Windows 电脑** 上跑集群，推荐使用以下一键启动脚本。
+
+| 脚本 | 角色 | 用途 |
+|------|------|------|
+| `start.bat` | standalone | 单机模式，一键启动，适合个人本地使用 |
+| `master_start.bat` | master | 主节点，只负责调度，不执行本地浏览器打码 |
+| `sub_start.bat` | subnode | 子节点，执行本地有头浏览器打码，向 master 注册 |
+
+---
+
+### 集群模式 vs 单节点模式
+
+#### 单节点（standalone）的适用场景
+
+- 个人本地使用
+- 单台机器，并发需求不高
+- 不需要多台机器协同
+- 所有功能（调度 + 打码）集中在一个进程
+
+#### 集群模式（master + subnode）的优势
+
+| 优势 | 说明 |
+|------|------|
+| **水平扩容** | 增加 subnode 即可线性提升并发打码能力，突破单机资源上限 |
+| **故障隔离** | 某台 subnode 崩溃，master 自动停止向其路由，其他节点继续工作 |
+| **统一入口** | 上游（flow2api）只对接 master 一个地址，subnode 上下线对上游透明 |
+| **资源分离** | master 轻量运行（无浏览器），可部署在低配机器或共享服务器上 |
+| **节点健康监控** | master 后台实时显示各 subnode 的状态、活跃并发、心跳时间 |
+| **Bucket 亲和调度** | master 会把同 project 的请求路由到同一 subnode，减少 context 重建 |
+
+---
+
+### 集群部署步骤
+
+#### 第一步：在主节点机器上启动 master
+
+1. 将完整项目目录复制到主节点机器
+2. 双击运行 `master_start.bat`
+3. 首次运行会创建 `data\master\setting.toml` 并暂停，编辑该文件：
+
+   ```toml
+   [cluster]
+   role = "master"
+   master_cluster_key = "your-secret-cluster-key"   # 设置一个强密钥
+
+   [admin]
+   password = "your-admin-password"   # 修改管理员密码
+   ```
+
+4. 保存后重新运行 `master_start.bat`
+5. 验证主节点正常运行：访问 `http://主节点IP:8060/admin`
+
+> **获取 cluster_key**：在管理后台 → 系统配置 中查看，或直接看 `data\master\setting.toml` 里的 `master_cluster_key`
+
+#### 第二步：在每台子节点机器上启动 subnode
+
+1. 将完整项目目录复制到子节点机器
+2. 双击运行 `sub_start.bat`
+3. 首次运行会创建 `sub_node.env` 并暂停，编辑该文件：
+
+   ```ini
+   # 主节点地址（子节点访问 master 的地址）
+   FCS_CLUSTER_MASTER_BASE_URL=http://192.168.1.100:8060
+
+   # 集群密钥（与主节点 master_cluster_key 一致）
+   FCS_CLUSTER_MASTER_CLUSTER_KEY=your-secret-cluster-key
+
+   # 本节点对外地址（master 回调此地址，不能填 127.0.0.1）
+   FCS_CLUSTER_NODE_PUBLIC_BASE_URL=http://192.168.1.101:8061
+
+   # 本节点认证 Key（随机字符串，每台子节点可以不同）
+   FCS_CLUSTER_NODE_API_KEY=subnode1-secret-key
+
+   # 节点名称（在 master 管理后台中显示）
+   FCS_NODE_NAME=subnode-1
+
+   # 服务端口
+   FCS_SERVER_PORT=8061
+
+   # 浏览器槽位数
+   FCS_BROWSER_COUNT=2
+   ```
+
+4. 保存后重新运行 `sub_start.bat`
+5. 几秒内，主节点后台 → 集群管理 中应出现该子节点
+
+#### 第三步：验证集群连通
+
+在主节点管理后台检查：
+
+```text
+http://主节点IP:8060/admin
+→ 集群管理
+→ 子节点列表中是否出现新节点
+→ 心跳时间是否持续更新
+→ 节点状态是否为健康
+```
+
+也可以用 API 快速验证：
+
+```bash
+# 验证主节点健康
+curl http://主节点IP:8060/api/v1/health
+
+# 验证子节点健康
+curl http://子节点IP:8061/api/v1/health
+```
+
+---
+
+### 多子节点配置示例
+
+同一台机器上不想跑两个实例（因为 `sub_node.env` 是共用文件），推荐直接在不同电脑上各跑一个 subnode，通过 `FCS_NODE_NAME` 和 `FCS_SERVER_PORT` 区分。
+
+如果确实需要同机多节点（测试场景），可以复制一份项目目录，各自维护独立的 `sub_node.env` 和 `.venv`。
+
+---
+
+### 重要注意事项
+
+- `FCS_CLUSTER_NODE_PUBLIC_BASE_URL` **不能填 `127.0.0.1`、`localhost` 或 `0.0.0.0`**——这是主节点回调子节点的地址，必须是主节点网络真正可达的 IP/域名
+- 每台子节点的 `FCS_CLUSTER_NODE_API_KEY` 可以相同也可以不同，建议不同以便审计
+- 如果主节点或子节点重启，子节点会在下次心跳时自动重新注册
+- `sub_node.env` 中的值不要包含引号，直接填值即可（`KEY=value` 格式）
+
+---
+
+
 
 第一次部署，建议只走脚本入口，不要先手动 `mkdir` / `cp` / `docker compose -f ...`。
 
