@@ -124,6 +124,10 @@ class PortalCdkBatchCreateRequest(BaseModel):
     note: Optional[str] = Field(default=None, max_length=200)
 
 
+class GrantQuotaRequest(BaseModel):
+    amount: int = Field(ge=1, le=2147483647)
+
+
 class UpdateCdkRequest(BaseModel):
     enabled: Optional[bool] = None
 

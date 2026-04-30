@@ -1963,12 +1963,15 @@
           <button id="navConfig" class="nav-tab" data-page="config"><span class="nav-main">系统配置</span><span class="nav-meta">管理角色、参数与浏览器设置</span></button>
           <button id="navLogs" class="nav-tab" data-page="logs"><span class="nav-main">日志</span><span class="nav-meta">分页查看调用记录与错误原因</span></button>
         </div>
+        <div id="navGroupPortal" class="nav-group hidden">
+          <div class="nav-group-label">门户管理</div>
+          <button id="navUsers" class="nav-tab hidden" data-page="users"><span class="nav-main">用户</span><span class="nav-meta">查看门户用户和额度使用</span></button>
+          <button id="navCdks" class="nav-tab hidden" data-page="cdks"><span class="nav-main">CDK</span><span class="nav-meta">生成、启停与分发兑换码</span></button>
+        </div>
         <div id="navGroupMaster" class="nav-group hidden">
           <div class="nav-group-label">主节点专属</div>
           <button id="navCluster" class="nav-tab hidden" data-page="cluster"><span class="nav-main">集群诊断</span><span class="nav-meta">跟踪节点健康、心跳与调度</span></button>
           <button id="navApiKeys" class="nav-tab hidden" data-page="apikeys"><span class="nav-main">API Key</span><span class="nav-meta">维护主节点服务密钥</span></button>
-          <button id="navUsers" class="nav-tab hidden" data-page="users"><span class="nav-main">用户</span><span class="nav-meta">查看门户用户和额度使用</span></button>
-          <button id="navCdks" class="nav-tab hidden" data-page="cdks"><span class="nav-main">CDK</span><span class="nav-meta">生成、启停与分发兑换码</span></button>
         </div>
         <div class="sidebar-summary">
           <div>
@@ -2330,6 +2333,32 @@
   </div>
 
   <div id="nodeDetailBackdrop" class="drawer-backdrop hidden"></div>
+
+  <!-- 颁发额度专用弹窗 -->
+  <div id="grantQuotaModalBackdrop" class="modal-backdrop">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="grantQuotaModalTitle" style="max-width:480px">
+      <div class="modal-head">
+        <div>
+          <h3 id="grantQuotaModalTitle">颁发额度</h3>
+          <p id="grantQuotaModalSubtitle" style="margin:6px 0 0;font-size:12px;color:#64748b;line-height:1.6">向指定用户增加打码次数</p>
+        </div>
+        <button id="closeGrantQuotaModalBtn" class="secondary" type="button">关闭</button>
+      </div>
+      <div class="modal-body">
+        <div id="grantQuotaModalInfo" class="modal-meta"></div>
+        <div class="field" style="margin-top:10px">
+          <label>颁发次数（≥1）</label>
+          <input id="grantQuotaAmount" type="number" min="1" value="100" placeholder="输入要颁发的次数" />
+        </div>
+        <div id="grantQuotaNotice" class="notice" style="margin-top:10px"></div>
+        <div class="modal-actions">
+          <button id="confirmGrantQuotaBtn" type="button">确认颁发</button>
+          <button id="cancelGrantQuotaBtn" class="secondary" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <aside id="nodeDetailDrawer" class="drawer hidden" aria-hidden="true">
     <div class="drawer-head">
       <h3 id="nodeDetailTitle">节点详情</h3>
@@ -2379,6 +2408,10 @@
           text: "",
         },
         revealedApiKeys: {},
+        grantQuota: {
+          userId: 0,
+          username: "",
+        },
       };
       const roleTextMap = { master: "主节点（master）", subnode: "子节点（subnode）", standalone: "单机（standalone）", unknown: "未登录" };
       const q = (id) => document.getElementById(id);
@@ -2428,7 +2461,7 @@
         users: {
           eyebrow: "用户中心",
           title: "门户用户管理",
-          desc: "查看门户账号状态、可用次数和账户信息，只在主节点模式下开放。",
+          desc: "查看门户账号状态、可用次数和账户信息，支持单机（standalone）和主节点（master）模式。",
           shortTitle: "用户",
         },
         cdks: {
@@ -2514,6 +2547,25 @@
         q("resultModalBackdrop").classList.remove("show");
         state.resultModal = { filename: "", text: "" };
       };
+
+      const closeGrantQuotaModal = () => {
+        q("grantQuotaModalBackdrop").classList.remove("show");
+        q("grantQuotaNotice").className = "notice";
+        q("grantQuotaNotice").textContent = "";
+        state.grantQuota = { userId: 0, username: "" };
+      };
+      const openGrantQuotaModal = (userId, username, quotaRemaining) => {
+        state.grantQuota = { userId: Number(userId), username: String(username || "") };
+        q("grantQuotaModalTitle").textContent = "颁发额度";
+        q("grantQuotaModalSubtitle").textContent = `用户：${username || userId}`;
+        q("grantQuotaModalInfo").textContent = `账号：${username || "-"}  当前剩余次数：${quotaRemaining ?? 0}`;
+        q("grantQuotaAmount").value = "100";
+        q("grantQuotaNotice").className = "notice";
+        q("grantQuotaNotice").textContent = "";
+        q("grantQuotaModalBackdrop").classList.add("show");
+        setTimeout(() => q("grantQuotaAmount").focus(), 80);
+      };
+
       const openResultModal = ({ title, subtitle, meta, text, filename, copyLabel = "复制内容", downloadLabel = "导出 TXT" }) => {
         state.resultModal = {
           filename: filename || "export.txt",
@@ -2580,13 +2632,18 @@
 
       const refreshNavByRole = () => {
         const isMaster = state.role === "master";
+        const hasPortal = state.role === "master" || state.role === "standalone";
+        q("navGroupPortal").classList.toggle("hidden", !hasPortal);
+        q("navUsers").classList.toggle("hidden", !hasPortal);
+        q("navCdks").classList.toggle("hidden", !hasPortal);
         q("navGroupMaster").classList.toggle("hidden", !isMaster);
         q("navCluster").classList.toggle("hidden", !isMaster);
         q("navApiKeys").classList.toggle("hidden", !isMaster);
-        q("navUsers").classList.toggle("hidden", !isMaster);
-        q("navCdks").classList.toggle("hidden", !isMaster);
         q("clusterStatsHint").classList.toggle("hidden", !isMaster);
-        if (!isMaster && ["cluster", "apikeys", "users", "cdks"].includes(state.page)) {
+        if (!isMaster && ["cluster", "apikeys"].includes(state.page)) {
+          setActivePage("overview");
+        }
+        if (!hasPortal && ["users", "cdks"].includes(state.page)) {
           setActivePage("overview");
         }
       };
@@ -2622,10 +2679,11 @@
         q("runtimeConfigPanel").classList.toggle("hidden", isMaster);
         q("masterConfigPanel").classList.toggle("hidden", !isMaster);
         q("subnodeConfigPanel").classList.toggle("hidden", !isSubnode);
+        const hasPortal = real === "master" || real === "standalone";
         q("masterClusterPanel").classList.toggle("hidden", !isMaster);
         q("masterApiKeyPanel").classList.toggle("hidden", !isMaster);
-        q("portalUsersPanel").classList.toggle("hidden", !isMaster);
-        q("portalCdksPanel").classList.toggle("hidden", !isMaster);
+        q("portalUsersPanel").classList.toggle("hidden", !hasPortal);
+        q("portalCdksPanel").classList.toggle("hidden", !hasPortal);
         refreshNavByRole();
       };
       const performLogout = async () => {
@@ -2903,14 +2961,14 @@
         q("apiKeyTableStat").textContent = `API Key ${items.length}`;
       };
       const loadPortalUsers = async () => {
-        if (state.role !== "master") return;
+        if (state.role === "subnode") return;
         const r = await req("/api/admin/users");
         const items = Array.isArray(r.items) ? r.items : [];
         state.portalUsers = items;
         const b = q("portalUsersTable"); b.innerHTML = "";
         for (const it of items) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td><input type="checkbox" data-user-select="1" data-user-id="${it.id}" /></td><td>${it.id}</td><td><div class="cell-stack"><span class="cell-main">${esc(it.username || "-")}</span></div></td><td><div class="cell-stack"><span class="cell-main">${esc(it.display_name || "-")}</span></div></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="quota-badge">${it.quota_remaining ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" min="0" value="${it.quota_remaining ?? 0}" data-user-id="${it.id}" data-user-key="quota_remaining" /></td><td><span class="quota-badge">${it.quota_used ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" value="0" data-user-id="${it.id}" data-user-key="quota_remaining_delta" /></td><td><input class="table-mini-input table-pass-input" type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${it.last_login_at || "-"}</td><td><div class="action-row"><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button><button class="secondary" data-action="delete-user" data-id="${it.id}">删除</button></div></td>`;
+          tr.innerHTML = `<td><input type="checkbox" data-user-select="1" data-user-id="${it.id}" /></td><td>${it.id}</td><td><div class="cell-stack"><span class="cell-main">${esc(it.username || "-")}</span></div></td><td><div class="cell-stack"><span class="cell-main">${esc(it.display_name || "-")}</span></div></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="quota-badge">${it.quota_remaining ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" min="0" value="${it.quota_remaining ?? 0}" data-user-id="${it.id}" data-user-key="quota_remaining" /></td><td><span class="quota-badge">${it.quota_used ?? 0}</span></td><td><input class="table-mini-input quota-delta" type="number" value="0" data-user-id="${it.id}" data-user-key="quota_remaining_delta" /></td><td><input class="table-mini-input table-pass-input" type="password" data-user-id="${it.id}" data-user-key="new_password" placeholder="留空不修改" /></td><td>${it.last_login_at || "-"}</td><td><div class="action-row"><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button><button class="secondary" data-action="grant-quota" data-id="${it.id}" data-username="${esc(it.username || '')}">颁发额度</button><button class="secondary" data-action="delete-user" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
         if (!items.length) {
@@ -2922,7 +2980,7 @@
         q("usersTableStat").textContent = `用户数 ${items.length}`;
       };
       const loadPortalCdks = async () => {
-        if (state.role !== "master") return;
+        if (state.role === "subnode") return;
         const r = await req("/api/admin/cdks");
         const items = Array.isArray(r.items) ? r.items : [];
         const b = q("portalCdksTable"); b.innerHTML = "";
@@ -3283,6 +3341,32 @@
         downloadTextFile(state.resultModal?.filename || "export.txt", state.resultModal?.text || "");
         showNotice("文件已导出。", "ok");
       });
+
+      q("closeGrantQuotaModalBtn").addEventListener("click", closeGrantQuotaModal);
+      q("cancelGrantQuotaBtn").addEventListener("click", closeGrantQuotaModal);
+      q("grantQuotaModalBackdrop").addEventListener("click", (event) => {
+        if (event.target === q("grantQuotaModalBackdrop")) closeGrantQuotaModal();
+      });
+      q("confirmGrantQuotaBtn").addEventListener("click", async () => {
+        const noticeEl = q("grantQuotaNotice");
+        try {
+          const userId = state.grantQuota?.userId;
+          if (!userId) throw new Error("用户 ID 无效");
+          const amount = toInt(q("grantQuotaAmount").value, 0);
+          if (amount <= 0) throw new Error("颁发次数必须大于 0");
+          const r = await req(`/api/admin/users/${userId}/grant-quota`, { method: "POST", body: { amount } });
+          noticeEl.className = "notice ok";
+          noticeEl.textContent = r.message || `已颁发 ${amount} 次。`;
+          await loadPortalUsers();
+          await loadStats();
+          setTimeout(closeGrantQuotaModal, 1400);
+          showNotice(r.message || `已向用户 #${userId} 颁发 ${amount} 次额度。`, "ok");
+        } catch (err) {
+          noticeEl.className = "notice err";
+          noticeEl.textContent = `颁发失败：${err.message}`;
+        }
+      });
+
       q("logsPrevBtn").addEventListener("click", async () => {
         if (state.logs.offset <= 0) return;
         state.logs.offset = Math.max(0, state.logs.offset - state.logs.limit);
@@ -3517,6 +3601,13 @@
           } catch (err) {
             showNotice(`保存用户失败：${err.message}`, "err");
           }
+        }
+
+        if (target.dataset.action === "grant-quota") {
+          const id = Number(target.dataset.id);
+          const username = String(target.dataset.username || "");
+          const user = state.portalUsers.find((u) => Number(u.id) === id);
+          openGrantQuotaModal(id, username || user?.username || String(id), user?.quota_remaining ?? 0);
         }
 
         if (target.dataset.action === "save-cdk") {

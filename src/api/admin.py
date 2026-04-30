@@ -14,6 +14,7 @@ from ..core.models import (
     ClusterNodeUpdateRequest,
     ClusterNodeLogClearRequest,
     CreateApiKeyRequest,
+    GrantQuotaRequest,
     LoginRequest,
     PortalCdkBatchCreateRequest,
     PortalUserUpdateRequest,
@@ -949,6 +950,36 @@ async def batch_delete_portal_users(
         "deleted_ids": deleted_ids,
         "deleted_count": len(deleted_ids),
         "message": f"已删除 {len(deleted_ids)} 个用户",
+    }
+
+
+@router.post("/users/{user_id}/grant-quota")
+@router.post("/portal-users/{user_id}/grant-quota")
+async def grant_user_quota(
+    user_id: int,
+    request: GrantQuotaRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """专用额度颁发接口：向指定门户用户增加打码次数（amount 必须 ≥ 1）。"""
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("用户额度颁发")
+
+    try:
+        updated = await _db.update_portal_user(
+            user_id=user_id,
+            quota_remaining_delta=request.amount,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    return {
+        "success": True,
+        "item": updated,
+        "granted": request.amount,
+        "message": f"已向用户 #{user_id} 颁发 {request.amount} 次额度，当前剩余：{updated.get('quota_remaining', 0)}",
     }
 
 

@@ -282,6 +282,62 @@ class ServiceLocalCaptchaModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["node_name"], "node-a")
         fake_service.get_token.assert_awaited_once_with("demo-project", "IMAGE_GENERATION")
 
+    async def test_portal_api_key_with_zero_quota_returns_403_then_recovers_after_refill(self):
+        fake_service = SimpleNamespace(
+            get_token=AsyncMock(
+                return_value=SimpleNamespace(
+                    token="portal-token",
+                    browser_ref=21,
+                    browser_id=21,
+                    fingerprint={"userAgent": "portal-agent"},
+                )
+            ),
+            close=AsyncMock(),
+        )
+        self.runtime._browser_service = fake_service
+        self.runtime._service_mode = "browser"
+
+        ok, _, portal_user = await self.db.create_portal_user(
+            username="portal-user",
+            password="secret",
+            register_location="local-test",
+            initial_quota=0,
+        )
+        self.assertTrue(ok)
+        portal_raw_key, _ = await self.db.create_portal_user_api_key(int(portal_user["id"]), "portal-key")
+
+        with patch("src.api.service.config", SimpleNamespace(cluster_role="standalone")):
+            with patch(
+                "src.services.captcha_runtime.config",
+                SimpleNamespace(
+                    cluster_role="standalone",
+                    captcha_method="browser",
+                    node_name="node-a",
+                    session_ttl_seconds=1200,
+                ),
+            ):
+                blocked_response = await self.client.post(
+                    "/api/v1/solve",
+                    headers={"Authorization": f"Bearer {portal_raw_key}"},
+                    json={"project_id": "demo-project", "action": "IMAGE_GENERATION"},
+                )
+
+                await self.db.update_portal_user(int(portal_user["id"]), quota_remaining=2)
+
+                recovered_response = await self.client.post(
+                    "/api/v1/solve",
+                    headers={"Authorization": f"Bearer {portal_raw_key}"},
+                    json={"project_id": "demo-project", "action": "IMAGE_GENERATION"},
+                )
+
+        blocked_payload = blocked_response.json()
+        recovered_payload = recovered_response.json()
+        self.assertEqual(blocked_response.status_code, 403)
+        self.assertEqual(blocked_payload["detail"], "剩余次数不足")
+        self.assertEqual(recovered_response.status_code, 200)
+        self.assertEqual(recovered_payload["token"], "portal-token")
+        fake_service.get_token.assert_awaited_once_with("demo-project", "IMAGE_GENERATION", token_id=None)
+
     async def test_concurrent_solve_route_returns_tokens_in_browser_mode(self):
         fake_service, state, first_response, second_response = await self._run_concurrent_solve_requests("browser")
 
