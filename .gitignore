@@ -11,7 +11,7 @@ data/*.db-*
 data/**/*.db
 data/**/*.db-*
 playwright-report/
-
 data/setting.toml
 data/*/setting.toml
 deploy/*.env.local
+flow_captcha_service.rar
